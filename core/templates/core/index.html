@@ -1,0 +1,58 @@
+{% extends 'core/base.html' %}
+{% load static %}
+
+{% block content %}
+<div class="text-center mb-12">
+    <h1 class="text-4xl font-bold text-gray-900 mb-4">Encontre seu novo lar</h1>
+    <p class="text-lg text-gray-600">Confira nossa seleção exclusiva de imóveis.</p>
+</div>
+
+<div class="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-8">
+    {% for imovel in imoveis %}
+    <a href="{% url 'imovel_detail' imovel.id %}" class="group block bg-white rounded-xl shadow-sm hover:shadow-md transition-shadow duration-300 overflow-hidden border border-gray-100">
+        <div class="h-48 bg-gray-200 w-full flex items-center justify-center text-gray-400 overflow-hidden">
+            {% if imovel.images.all %}
+            <img src="{{ imovel.images.first.image.url }}" alt="{{ imovel.titulo }}" class="w-full h-full object-cover group-hover:scale-105 transition-transform duration-500">
+            {% elif imovel.imagem %}
+            <img src="{% get_static_prefix %}core/images/{{ imovel.imagem }}" alt="{{ imovel.titulo }}" class="w-full h-full object-cover group-hover:scale-105 transition-transform duration-500">
+            {% else %}
+            <svg class="w-12 h-12" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M3 9l9-7 9 7v11a2 2 0 01-2 2H5a2 2 0 01-2-2z"></path><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 22V12h6v10"></path></svg>
+            {% endif %}
+        </div>
+        <div class="p-6">
+            <div class="flex justify-between items-start mb-2">
+                <h3 class="text-xl font-bold text-gray-900 group-hover:text-blue-600 transition-colors">{{ imovel.titulo }}</h3>
+                <span class="bg-blue-100 text-blue-800 text-xs font-semibold px-2.5 py-0.5 rounded">Aluguel</span>
+            </div>
+            <p class="text-gray-500 text-sm mb-4 line-clamp-2">{{ imovel.descricao }}</p>
+            
+            <div class="flex items-center gap-4 text-gray-500 text-sm mb-4">
+                <div class="flex items-center gap-1">
+                    <span>🛏️</span> {{ imovel.quartos }}
+                </div>
+                <div class="flex items-center gap-1">
+                    <span>🚿</span> {{ imovel.banheiros }}
+                </div>
+                <div class="flex items-center gap-1">
+                    <span>🚗</span> {{ imovel.garagem }}
+                </div>
+                <div class="flex items-center gap-1">
+                    <span>📏</span> {{ imovel.area }}m²
+                </div>
+            </div>
+
+            <div class="border-t pt-4 flex justify-between items-center">
+                <div>
+                    <span class="text-xs text-gray-500 block">Valor Mensal</span>
+                    <span class="text-lg font-bold text-blue-600">R$ {{ imovel.preco_aluguel }}</span>
+                </div>
+                <div class="text-right">
+                    <span class="text-xs text-gray-500 block">{{ imovel.cidade }}</span>
+                    <span class="text-sm text-gray-700">{{ imovel.bairro }}</span>
+                </div>
+            </div>
+        </div>
+    </a>
+    {% endfor %}
+</div>
+{% endblock %}

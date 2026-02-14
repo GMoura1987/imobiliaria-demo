@@ -1,0 +1,21 @@
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+
+# Virtual Environment
+venv/
+env/
+.env
+
+# Database
+db.sqlite3
+
+# Media
+media/
+!media/.gitkeep
+
+# System
+.DS_Store
+Thumbs.db
