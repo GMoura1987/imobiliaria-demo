@@ -325,13 +325,22 @@ Cliente: {contexto}
 Ana Paula:"""
     return llm.invoke(prompt).content
 
+def quer_busca_explicita(msg):
+    """Detecta se o usuário está explicitamente pedindo uma NOVA busca"""
+    termos_busca = [
+        "procuro", "busco", "gostaria de ver", "tem algum", "você tem", "queria ver", 
+        "mostra outro", "outras opções", "mudar de bairro", "ver casas", "ver aptos"
+    ]
+    return any(termo in msg for termo in termos_busca)
+
+
 # === CHAT PRINCIPAL ===
 
 def ana_paula_chat(mensagem_usuario):
     historico = memory.load_memory_variables({})["chat_history"]
     ja_saudou = len(historico) > 0
     msg = mensagem_usuario.lower()
-
+    
     # --- FLUXO 1: LINK DIRETO DO IMÓVEL ---
     imovel_id = extrair_id_da_url(mensagem_usuario)
     if imovel_id:
@@ -353,28 +362,35 @@ def ana_paula_chat(mensagem_usuario):
             memory.save_context({"input": mensagem_usuario}, {"output": resposta})
             return resposta
 
-    # --- FLUXO 2: PRIMEIRA INTERAÇÃO ---
-    if not ja_saudou:
-        bairros = buscar_bairros_disponiveis()
-        bairros_txt = ", ".join(b.title() for b in bairros) if bairros else "diversos bairros"
-        resposta = f"""Oi! Tudo bem? Sou a Ana Paula, corretora aqui da região de Juiz de Fora 😊
-
-Temos imóveis disponíveis em {bairros_txt}.
-
-Me conta, o que você tá procurando? Quantos quartos precisa, tem preferência de bairro? E qual valor mais ou menos cabe no bolso?"""
-        memory.save_context({"input": mensagem_usuario}, {"output": resposta})
-        return resposta
-
-    # --- FLUXO 3: BUSCA DE IMÓVEIS ---
+    # EXTRAÇÃO DE INTENÇÃO E CRITÉRIOS
     criterios = extrair_criterios(mensagem_usuario)
     quer_ver_todas = any(p in msg for p in ['todas', 'todos', 'tudo', 'qualquer', 'outras', 'opções', 'opcoes', 'disponíveis', 'disponiveis'])
     palavras_busca = ["apartamento", "casa", "imóvel", "imovel", "imóveis", "imoveis", "procuro", "quero", "preciso", "mostra", "mostre", "tem algo"]
     quer_buscar = any(p in msg for p in palavras_busca)
 
+    # --- FLUXO 2: PRIMEIRA INTERAÇÃO ---
+    if not ja_saudou:
+        # Se o usuário já chegou pedindo algo específico (tem critérios ou busca), PULA a saudação puramente social
+        # e já processa a busca (o LLM pode saudar na resposta da busca)
+        tem_intencao_clara = criterios or quer_buscar or quer_ver_todas
+        if not tem_intencao_clara:
+            bairros = buscar_bairros_disponiveis()
+            bairros_txt = ", ".join(b.title() for b in bairros) if bairros else "diversos bairros"
+            resposta = f"""Oi! Tudo bem? Sou a Ana Paula, corretora aqui da região de Juiz de Fora 😊
+
+Temos imóveis disponíveis em {bairros_txt}.
+
+Como posso te ajudar hoje?"""
+            memory.save_context({"input": mensagem_usuario}, {"output": resposta})
+            return resposta
+
+
     # Evita que perguntas sobre documentos, visitas, etc. disparem busca de imóveis
     palavras_nao_busca = ['documento', 'fiador', 'fiança', 'contrato', 'agendar', 'visita',
-                          'visitação', 'horário', 'horario', 'quando', 'onde fica', 'endereço',
-                          'telefone', 'whatsapp', 'obrigad', 'valeu', 'brigad']
+                          'visitação', 'horário', 'horario', 'quando', 'onde', 'fica', 'endereço',
+                          'telefone', 'whatsapp', 'obrigad', 'valeu', 'brigad', 'qual', 'quais',
+                          'detalhe', 'mais', 'sobre', 'esse', 'essa', 'esses', 'essas', 'aquele',
+                          'aquela', 'aqueles', 'aquelas', 'deste', 'desta', 'disso', 'daquilo']
     e_conversa_geral = any(p in msg for p in palavras_nao_busca)
 
     # Identifica se é apenas um refinamento menor (ex: "aceita pets?", "tem garagem?")
@@ -382,9 +398,58 @@ Me conta, o que você tá procurando? Quantos quartos precisa, tem preferência 
     criterios_secundarios = ['aceita_pets', 'quartos_min', 'preco_max']
     so_tem_secundarios = all(k in criterios_secundarios for k in criterios.keys()) and criterios
     imovel_focado = bool(imovel_em_foco) or bool(ultimos_imoveis_mostrados)
-    eh_pergunta_contexto = so_tem_secundarios and imovel_focado and not quer_buscar and not quer_ver_todas
+    eh_pergunta_contexto = (so_tem_secundarios or e_conversa_geral) and imovel_focado and not quer_busca_explicita(msg)
 
-    if (criterios or quer_buscar or quer_ver_todas) and not e_conversa_geral and not eh_pergunta_contexto:
+    # Só busca se tiver critérios/intenção E não for uma pergunta de contexto/geral
+    # Mas se for busca explicita ("quero ver..."), ignora e_conversa_geral (ex: "quero ver onde fica")
+    deve_buscar = (criterios or quer_buscar or quer_ver_todas)
+    bloqueio_conversa = e_conversa_geral and not quer_busca_explicita(msg)
+    
+    # --- FLUXO 2.5: QUALIFICAÇÃO (NEEDS ASSESSMENT) ---
+    # Se o usuário quer buscar mas foi muito vago, vamos qualificar melhor antes de consultar o banco.
+    # Exceção: se ele disse "mostra tudo", "qualquer um", ou se já temos bastante contexto.
+    if deve_buscar and not eh_pergunta_contexto and not bloqueio_conversa and not quer_ver_todas:
+        # Critérios mínimos para uma busca eficiente:
+        # Bairro + (Preço OU Quartos OU Tipo)
+        # OU Texto livre (que indica busca especifica)
+        # Se só tiver bairro, é muito amplo.
+        
+        tem_bairro = 'bairro' in criterios
+        tem_preco = 'preco_max' in criterios
+        tem_quartos = 'quartos_min' in criterios
+        tem_texto = 'texto_busca' in criterios
+        
+        criterios_insuficientes = False
+        perguntas_faltantes = []
+        
+        if tem_bairro and not (tem_preco or tem_quartos or tem_texto):
+            criterios_insuficientes = True
+            perguntas_faltantes.append("faixa de preço")
+            perguntas_faltantes.append("número de quartos")
+            
+        elif not criterios and not quer_busca_explicita(msg): 
+            # Se não tem criterio NENHUM e não foi explicito ("quero ver imoveis"), 
+            # talvez seja só papo furado, mas se passou pelo filtro de busca...
+            # Se não tem nada, pergunta tudo.
+            criterios_insuficientes = True
+            perguntas_faltantes.append("bairro de preferência")
+            perguntas_faltantes.append("tipo de imóvel")
+            
+        if criterios_insuficientes:
+            # Gera resposta pedindo detalhes
+            prompt_qualificacao = f"""Você é a Ana Paula, corretora. O cliente quer buscar imóveis mas foi muito vago.
+Não faça a busca ainda. Em vez disso, faça perguntas para entender melhor o que ele precisa.
+O cliente disse: "{mensagem_usuario}"
+Critérios que ele JÁ DEU: {criterios}
+Informações que FALTAM e você deve pedir (escolha 1 ou 2 principais para não ser chata): {perguntas_faltantes}
+
+Pergunte de forma natural, simpática e curta. Ex: "Legal que você gosta do bairro X! Mas me diz, até qual valor você pretende investir?" """
+            
+            resposta = llm.invoke(prompt_qualificacao).content
+            memory.save_context({"input": mensagem_usuario}, {"output": resposta})
+            return resposta
+
+    if deve_buscar and not eh_pergunta_contexto and not bloqueio_conversa:
         # Busca com critérios ou tudo
         if quer_ver_todas and not criterios:
             imoveis = buscar_todos_imoveis()
@@ -426,6 +491,9 @@ Me conta, o que você tá procurando? Quantos quartos precisa, tem preferência 
         # Salva imóveis mostrados para follow-ups
         ultimos_imoveis_mostrados.clear()
         ultimos_imoveis_mostrados.extend(melhores)
+        
+        # Limpa foco anterior pois é uma nova busca
+        imovel_em_foco.clear()
 
         fichas = "\n\n".join(formatar_imovel(im, i) for i, im in enumerate(melhores, 1))
 
@@ -438,7 +506,7 @@ Ao final, pergunte qual agradou mais e ofereça agendar uma visita.
 
 IMÓVEIS ENCONTRADOS:
 {fichas}"""
-
+        
         resposta = resposta_llm_corretora(mensagem_usuario, dados_contexto)
         memory.save_context({"input": mensagem_usuario}, {"output": resposta})
         return resposta
@@ -454,7 +522,14 @@ IMÓVEIS ENCONTRADOS:
             # (para evitar misturar listas antigas se houve nova busca)
             ids_mostrados = [im['id'] for im in ultimos_imoveis_mostrados]
             if imovel_em_foco['id'] in ids_mostrados:
-                imovel_especifico = imovel_em_foco
+                # IMPORTANTE: .copy() para evitar alias com a global imovel_em_foco, 
+                # pois ela será limpa (clear) logo abaixo
+                imovel_especifico = imovel_em_foco.copy()
+        
+        # Se ainda não identificou mas é uma pergunta direta sobre "ele", "esse", "o imóvel"
+        # e só temos UM imóvel mostrado, assume que é ele
+        if not imovel_especifico and len(ultimos_imoveis_mostrados) == 1:
+             imovel_especifico = ultimos_imoveis_mostrados[0]
 
         if imovel_especifico:
             # Salva o imóvel em foco para próximas interações
@@ -467,8 +542,10 @@ TODOS OS DADOS DESTE IMÓVEL (incluindo preços, condomínio, IPTU, etc):
 {ficha_detalhada}
 
 Você TEM todas as informações acima. Use-as para responder a pergunta do cliente.
-Se a pergunta for sobre algo que está nos dados (ex: "aceita pets?"), responda diretamente com SIM ou NÃO e dê detalhes."""
+Se a pergunta for sobre algo que está nos dados (ex: "aceita pets?"), responda diretamente com SIM ou NÃO e dê detalhes.
+IMPORTANTE: Se a pergunta for sobre endereço (rua, número), forneça exatamente o que está nos dados."""
         else:
+            # Contexto geral dos mostrados
             fichas = "\n\n---\n\n".join(formatar_imovel_detalhado(im) for im in ultimos_imoveis_mostrados)
             dados_contexto = f"""O cliente está fazendo uma pergunta sobre os imóveis que você já mostrou.
 
@@ -477,6 +554,8 @@ TODOS OS DADOS DOS IMÓVEIS (incluindo preços, condomínio, IPTU, área, quarto
 {fichas}
 
 Você TEM todas as informações acima. Use-as para responder a pergunta do cliente.
+Identifique sobre qual imóvel ele está falando pelo contexto da conversa anterior ou pela pergunta.
+Se não souber qual imóvel ele quer, pergunte "De qual imóvel você está falando?".
 Se o cliente perguntar sobre um tipo de imóvel que não existe na lista (ex: uma "casa" quando só tem apartamentos), diga que não tem esse tipo e sugira as opções que você tem."""
 
         resposta = resposta_llm_corretora(mensagem_usuario, dados_contexto)
