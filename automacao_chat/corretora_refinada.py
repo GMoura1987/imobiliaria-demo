@@ -313,8 +313,11 @@ REGRAS IMPORTANTÍSSIMAS:
 - NÃO invente informações sobre imóveis. Use SOMENTE os dados fornecidos abaixo.
 - NUNCA misture informações de bairros diferentes. Se o cliente perguntou sobre São Mateus, fale APENAS dos imóveis em São Mateus.
 - Não confunda tipos de imóvel: se é apartamento, diga apartamento. Se é casa, diga casa. Não troque.
-- Se DADOS DE IMÓVEIS foram fornecidos abaixo, TODAS as informações estão lá (preço, condomínio, IPTU, quartos, banheiros, etc). USE esses dados para responder.
+- SE DADOS DE IMÓVEIS foram fornecidos abaixo, TODAS as informações estão lá (preço, condomínio, IPTU, quartos, banheiros, etc). USE esses dados para responder.
 - Só diga que vai verificar se realmente NÃO existem dados de imóveis abaixo.
+- SE A LISTA DE IMÓVEIS ESTIVER VAZIA (ou se o aviso disser que não encontrou), SEJA HONESTA. Diga "Infelizmente não tenho opções nesse bairro/perfil no momento".
+- JAMAIS INVENTE IMOVEIS. Se a lista abaixo tem imóveis em Benfica, NÃO DIGA que eles ficam no São Mateus.
+- Se a busca retornou "Não encontrei com esses critérios", DEIXE CLARO que os imóveis mostrados são de OUTROS bairros ou perfis.
 
 Histórico da conversa: {historico}
 
@@ -365,8 +368,19 @@ def ana_paula_chat(mensagem_usuario):
     # EXTRAÇÃO DE INTENÇÃO E CRITÉRIOS
     criterios = extrair_criterios(mensagem_usuario)
     quer_ver_todas = any(p in msg for p in ['todas', 'todos', 'tudo', 'qualquer', 'outras', 'opções', 'opcoes', 'disponíveis', 'disponiveis'])
-    palavras_busca = ["apartamento", "casa", "imóvel", "imovel", "imóveis", "imoveis", "procuro", "quero", "preciso", "mostra", "mostre", "tem algo"]
+    palavras_busca = ["apartamento", "casa", "imóvel", "imovel", "imóveis", "imoveis", "procuro", "quero", "preciso", "mostra", "mostre", "tem algo", "tem outro", "tem mais", "teria outro"]
     quer_buscar = any(p in msg for p in palavras_busca)
+
+    # Contexto de Bairro: "neste bairro", "nesse bairro", "mesmo bairro", "por aqui"
+    if 'bairro' not in criterios and (imovel_em_foco or ultimos_imoveis_mostrados):
+        termos_bairro_contexto = ['neste bairro', 'nesse bairro', 'mesmo bairro', 'naquele bairro', 'nessa região', 'nessa regiao', 'por aqui']
+        if any(termo in msg for termo in termos_bairro_contexto):
+            # Tenta pegar do foco atual ou do último mostrado
+            ref = imovel_em_foco if imovel_em_foco else ultimos_imoveis_mostrados[0]
+            if ref and 'bairro' in ref:
+                criterios['bairro'] = ref['bairro']
+                # Se inferiu bairro pelo contexto, reforça que é uma busca
+                quer_buscar = True
 
     # --- FLUXO 2: PRIMEIRA INTERAÇÃO ---
     if not ja_saudou:
@@ -473,14 +487,22 @@ Pergunte de forma natural, simpática e curta. Ex: "Legal que você gosta do bai
                 if imoveis:
                     aviso = "\n⚠️ Flexibilizei os critérios. Veja o que temos no bairro:\n"
 
-            # Tudo
-            if not imoveis:
+            # Tudo (Relaxamento final)
+            # SÓ relaxa para "todos" se o usuário NÃO especificou bairro.
+            # Se ele pediu um bairro específico e não tem nada lá, é melhor dizer que não tem
+            # do que mostrar imóveis de outro lado (o que causa alucinação de local).
+            if not imoveis and 'bairro' not in criterios:
                 imoveis = buscar_todos_imoveis()
                 if imoveis:
                     aviso = "\n⚠️ Não encontrei com esses critérios, mas olha o que temos disponível:\n"
 
         if not imoveis:
-            resposta = "No momento não temos imóveis cadastrados, mas me passa seu contato que assim que surgir algo eu te aviso! 😉"
+            # Resposta honesta quando não encontra nada no bairro pedido
+            if 'bairro' in criterios:
+                 resposta = f"Infelizmente não tenho opções disponíveis em {criterios['bairro'].title()} no momento. 😕\n\nQuer dar uma olhada em outros bairros?"
+            else:
+                 resposta = "No momento não temos imóveis cadastrados com essas características, mas me passa seu contato que assim que surgir algo eu te aviso! 😉"
+            
             memory.save_context({"input": mensagem_usuario}, {"output": resposta})
             return resposta
 
@@ -504,6 +526,8 @@ Apresente EXATAMENTE estes {len(melhores)} imóveis abaixo (não invente outros)
 Copie os dados como estão, depois faça um breve comentário sobre cada um destacando os pontos fortes.
 Ao final, pergunte qual agradou mais e ofereça agendar uma visita.
 
+IMPORTANTE: Se o aviso acima diz "Não encontrei", DEIXE CLARO que estas opções são de OUTROS bairros/valores. NÃO minta sobre a localização.
+
 IMÓVEIS ENCONTRADOS:
 {fichas}"""
         
@@ -512,7 +536,8 @@ IMÓVEIS ENCONTRADOS:
         return resposta
 
     # --- FLUXO 3.5: FOLLOW-UP sobre imóveis já mostrados ---
-    if ultimos_imoveis_mostrados:
+    # Só entra aqui se NÃO for uma nova busca explícita (para não confundir "tem outros?" com "fale mais desse")
+    if ultimos_imoveis_mostrados and not quer_buscar and not quer_busca_explicita(mensagem_usuario):
         # Tenta identificar qual imóvel específico o cliente quer saber
         imovel_especifico = identificar_imovel_mencionado(mensagem_usuario, ultimos_imoveis_mostrados)
 
@@ -529,7 +554,7 @@ IMÓVEIS ENCONTRADOS:
         # Se ainda não identificou mas é uma pergunta direta sobre "ele", "esse", "o imóvel"
         # e só temos UM imóvel mostrado, assume que é ele
         if not imovel_especifico and len(ultimos_imoveis_mostrados) == 1:
-             imovel_especifico = ultimos_imoveis_mostrados[0]
+             imovel_especifico = ultimos_imoveis_mostrados[0].copy()
 
         if imovel_especifico:
             # Salva o imóvel em foco para próximas interações
