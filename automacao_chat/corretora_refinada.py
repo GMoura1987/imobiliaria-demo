@@ -7,9 +7,11 @@ from langchain_community.utilities import SQLDatabase
 from langchain_community.agent_toolkits import create_sql_agent
 from langchain_classic.memory import ConversationBufferMemory
 
+import os
+
 # --- CONFIGURAÇÕES ---
 DB_PATH = "db.sqlite3"
-MODEL_NAME = "llama3.1:8b"
+MODEL_NAME = os.getenv("MODEL_NAME", "llama3.1:8b")
 
 llm = ChatOllama(model=MODEL_NAME, temperature=0.4, top_p=0.9)
 memory = ConversationBufferMemory(memory_key="chat_history", return_messages=True)
@@ -184,7 +186,7 @@ def extrair_criterios(mensagem):
             'apartamento', 'casa', 'imóvel', 'imovel', 'imoveis', 'imóveis', 'alugar', 'aluguel',
             'ver', 'mostra', 'mostre', 'mostrar', 'favor', 'pode', 'poderia', 'região', 'regiao',
             'bairro', 'local', 'lugar', 'área', 'area', 'reais', 'real', 'até', 'entre',
-            'quartos', 'quarto', 'muito', 'mais', 'menos', 'bem', 'tudo', 'todo', 'toda',
+            'quartos', 'quarto', 'muito', 'menos', 'bem', 'tudo', 'todo', 'toda',
         }
         # Extrai palavras significativas (3+ caracteres, não numéricas, não stop words)
         palavras = [p for p in re.findall(r'[a-záàâãéêíóôõúç]+', msg)
@@ -296,11 +298,11 @@ COMO VOCÊ SE COMPORTA:
 - Você usa "rs", "kkk", "haha" quando apropriado (mas sem exagero)
 - Você às vezes quebra a frase em mensagens curtas ao invés de um textão
 - Você NÃO repete saudações se já cumprimentou o cliente
-- Você é simpática mas profissional, como uma vendedora que quer fechar negócio
+- Você é simpática mas profissional, como uma vendedora que quer ajudar
 - Suas respostas são CURTAS, no máximo 4-5 frases por vez
-- Você tenta sempre avançar pro próximo passo: agendar visita, pegar dados, fechar contrato
+- Você tenta sempre avançar pro próximo passo: agendar visita ou sugerir preencher a ficha para adiantar
 
-SEU OBJETIVO: fazer o cliente alugar um imóvel. Você quer fechar negócio.
+SEU OBJETIVO: ajudar o cliente a encontrar o imóvel ideal e facilitar a burocracia.
 
 DOCUMENTOS NECESSÁRIOS PARA LOCAÇÃO (use quando perguntarem):
 - Comprovante de renda (últimos 3 holerites OU extrato bancário dos últimos 6 meses)
@@ -315,6 +317,7 @@ REGRAS IMPORTANTÍSSIMAS:
 - Não confunda tipos de imóvel: se é apartamento, diga apartamento. Se é casa, diga casa. Não troque.
 - SE DADOS DE IMÓVEIS foram fornecidos abaixo, TODAS as informações estão lá (preço, condomínio, IPTU, quartos, banheiros, etc). USE esses dados para responder.
 - Só diga que vai verificar se realmente NÃO existem dados de imóveis abaixo.
+- IMPORTANTE: Nunca peça para assinar contrato antes do cliente visitar o imóvel. Se ele perguntar de documentos, sugira apenas deixar a ficha preenchida e conferida para ganhar tempo caso ele goste do imóvel.
 - SE A LISTA DE IMÓVEIS ESTIVER VAZIA (ou se o aviso disser que não encontrou), SEJA HONESTA. Diga "Infelizmente não tenho opções nesse bairro/perfil no momento".
 - JAMAIS INVENTE IMOVEIS. Se a lista abaixo tem imóveis em Benfica, NÃO DIGA que eles ficam no São Mateus.
 - Se a busca retornou "Não encontrei com esses critérios", DEIXE CLARO que os imóveis mostrados são de OUTROS bairros ou perfis.
@@ -368,8 +371,20 @@ def ana_paula_chat(mensagem_usuario):
     # EXTRAÇÃO DE INTENÇÃO E CRITÉRIOS
     criterios = extrair_criterios(mensagem_usuario)
     quer_ver_todas = any(p in msg for p in ['todas', 'todos', 'tudo', 'qualquer', 'outras', 'opções', 'opcoes', 'disponíveis', 'disponiveis'])
-    palavras_busca = ["apartamento", "casa", "imóvel", "imovel", "imóveis", "imoveis", "procuro", "quero", "preciso", "mostra", "mostre", "tem algo", "tem outro", "tem mais", "teria outro"]
-    quer_buscar = any(p in msg for p in palavras_busca)
+    
+    # Palavras que indicam busca explícita
+    palavras_busca_forte = ["procuro", "quero", "preciso", "mostra", "mostre", "tem algo", "tem outro", "tem mais", 
+                            "teria outro", "ver mais", "algum outro", "outra opção", "outras opcoes"]
+    quer_buscar = any(p in msg for p in palavras_busca_forte)
+
+    # "Mais" sozinho é perigoso. Só ativa busca se não for "mais detalhes" ou "fale mais"
+    if "mais" in msg and not quer_buscar:
+        # Frases de contexto (NÃO busca)
+        frases_contexto = ["mais detalhe", "fale mais", "conte mais", "saber mais", "mais sobre", "mais informa"]
+        eh_pedido_detalhe = any(f in msg for f in frases_contexto)
+        if not eh_pedido_detalhe:
+             # Se tem "mais" e não é pedido de detalhe, assume que é "tem mais?"
+             quer_buscar = True
 
     # Contexto de Bairro: "neste bairro", "nesse bairro", "mesmo bairro", "por aqui"
     if 'bairro' not in criterios and (imovel_em_foco or ultimos_imoveis_mostrados):
@@ -471,6 +486,19 @@ Pergunte de forma natural, simpática e curta. Ex: "Legal que você gosta do bai
         else:
             imoveis = buscar_imoveis_filtrados(**criterios) if criterios else buscar_todos_imoveis()
             aviso = ""
+
+        # --- FILTRO ANTI-REPETIÇÃO ---
+        # Se o usuário pediu "tem outro" ou "tem mais", não faz sentido mostrar o MESMO imóvel que ele está vendo.
+        termos_outros = ["outro", "outra", "mais", "algum", "opção", "opcoes"]
+        pediu_outros = any(t in msg for t in termos_outros)
+        
+        if imoveis and imovel_em_foco and pediu_outros:
+            # Filtra o imóvel que já está em foco
+            imoveis = [im for im in imoveis if im['id'] != imovel_em_foco.get('id')]
+            
+            # Se a lista ficou vazia DEPOIS do filtro, significa que só tinha ele mesmo.
+            if not imoveis:
+                aviso = "\n⚠️ Além deste imóvel que estamos vendo, não encontrei outros com as mesmas características.\n"
 
         # Relaxamento progressivo se não encontrar
         if not imoveis and criterios:
@@ -604,7 +632,7 @@ Use essas informações se a pergunta do cliente for relacionada a este imóvel.
 
 
 # === LOOP PRINCIPAL ===
-if __name__ == "__main__":
+def main():
     print("\n" + "="*60)
     print("🏠 CORRETORA ANA PAULA - Imóveis sob medida pra você")
     print("="*60 + "\n")
@@ -612,17 +640,27 @@ if __name__ == "__main__":
     # Inicializa índice FTS5 para busca rápida em descrições
     inicializar_fts()
 
+    # Saudação inicial (pode ser "oi" ou qualquer outra coisa pra startar)
     primeira = ana_paula_chat("oi")
     print(f"🏠 Ana Paula: {primeira}\n")
 
     while True:
-        voce = input("👤 Você: ")
-        if voce.strip().lower() in ['sair', 'parar', 'tchau']:
-            print("\n🏠 Ana Paula: Foi um prazer te atender! Quando quiser voltar a conversar sobre imóveis, é só me chamar. Até logo! 👋\n")
+        try:
+            voce = input("👤 Você: ")
+            if voce.strip().lower() in ['sair', 'parar', 'tchau']:
+                print("\n🏠 Ana Paula: Foi um prazer te atender! Quando quiser voltar a conversar sobre imóveis, é só me chamar. Até logo! 👋\n")
+                break
+
+            print(f"\n   [💬 Você disse: '{voce}']")
+            print(f"   [⏳ Buscando as melhores opções...]\n")
+
+            resposta = ana_paula_chat(voce)
+            print(f"🏠 Ana Paula: {resposta}\n")
+        except KeyboardInterrupt:
+            print("\n🏠 Ana Paula: Até logo! 👋\n")
             break
+        except Exception as e:
+            print(f"\n⚠️ Ocorreu um erro: {e}")
 
-        print(f"\n   [💬 Você disse: '{voce}']")
-        print(f"   [⏳ Buscando as melhores opções...]\n")
-
-        resposta = ana_paula_chat(voce)
-        print(f"🏠 Ana Paula: {resposta}\n")
+if __name__ == "__main__":
+    main()
