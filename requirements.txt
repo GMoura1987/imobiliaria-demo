@@ -2,3 +2,7 @@ asgiref==3.11.1
 Django==6.0.2
 pillow==12.1.1
 sqlparse==0.5.5
+pandas
+langchain
+langchain-community
+langchain-ollama
