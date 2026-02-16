@@ -136,7 +136,7 @@ def gerar_resposta_ana_paula(contexto, mensagem_usuario):
        b) NÃO FALE DA FICHA DE CADASTRO AINDA. Aguarde o cliente responder o horário.
        c) APÓS o cliente definir o horário: Confirme o agendamento e SÓ ENTÃO explique que a **Ficha de Pré-Cadastro** agiliza a análise jurídica.
        d) Liste os documentos necessários ({DOCS_LOCACAO}) logo após explicar a ficha.
-       e) Se o cliente NÃO quiser fazer a ficha, diga "Tudo bem, nos encontramos no imóvel" e confirme a visita.
+       e) Se o cliente NÃO quiser fazer a ficha, diga "Tudo bem, nos encontramos no imóvel". RESSALTE que para realizar a visita, o ÚNICO documento obrigatório em mãos é o **RG**.
     10. NÃO mencione a ficha de cadastro em todas as mensagens. Apenas APÓS agendar a visita.
     11. SE O CLIENTE ACHAR CARO: Tente argumentar sobre o custo-benefício (localização, acabamento) OU ofereça opções mais baratas se houver no contexto.
     
