@@ -130,8 +130,10 @@ def gerar_resposta_ana_paula(contexto, mensagem_usuario):
     4. Se o cliente fez uma pergunta genérica ("imóveis no bairro X"), mostre todos os tipos disponíveis.
     5. Se o cliente pediu um tipo específico (ex: casa) e você só tem outros tipos, explique: "Não encontrei casas, mas tenho estas opções no mesmo bairro:".
     6. Use no máximo 1 emoji por resposta. Foco em Locação.
-    7. Para cada imóvel, mencione: nome, bairro, preço e uma breve descrição.
+    7. Para cada imóvel, apresente o PREÇO TOTAL (Aluguel + Taxas) se o cliente perguntar sobre valores. Use os dados detalhados do contexto.
     8. Se perguntarem sobre documentação para locação, informe: {DOCS_LOCACAO}
+    9. SE O CLIENTE DEMONSTRAR INTERESSE em visitar ou alugar: Diga que para agilizar o atendimento é recomendável fazer a **Ficha de Pré-Cadastro** antes da visita. Isso facilita a aprovação e proposta.
+    10. SE O CLIENTE ACHAR CARO: Tente argumentar sobre o custo-benefício (localização, acabamento) OU ofereça opções mais baratas se houver no contexto.
     
     CONTEXTO DO BANCO DE DADOS:
     {contexto}
@@ -179,7 +181,17 @@ def chat_pipeline(mensagem_usuario):
     texto_contexto = "IMÓVEIS ENCONTRADOS (BUSCA EXATA):\n"
     if imoveis:
         for i in imoveis:
-            texto_contexto += f"- ID {i['id']}: {i['titulo']} no {i['bairro']} (R$ {i['preco_aluguel']}). {i['descricao']}\n"
+            custo_total = i['preco_aluguel'] + i['preco_iptu'] + i['preco_condominio']
+            pets_txt = "Aceita Pets" if i['aceita_pets'] else "Não aceita pets"
+            texto_contexto += (
+                f"- ID {i['id']}: {i['titulo']} no {i['bairro']}\n"
+                f"  * Aluguel: R$ {i['preco_aluguel']} | IPTU: R$ {i['preco_iptu']} | Condomínio: R$ {i['preco_condominio']}\n"
+                f"  * TOTAL MENSAL: R$ {custo_total}\n"
+                f"  * Detalhes: {i['quartos']} quartos, {i['banheiros']} banheiros, {i['garagem']} vaga(s), {i['area']}m²\n"
+                f"  * Extra: {pets_txt}\n"
+                f"  * Descrição: {i['descricao']}\n"
+                f"  * Código Bairro: {i['codigo_bairro']}\n\n"
+            )
     else:
         texto_contexto += "Nenhum imóvel encontrado com os critérios exatos.\n"
     
