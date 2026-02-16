@@ -1,6 +1,7 @@
 import json
 import sqlite3
 import re
+import difflib
 from langchain_ollama import ChatOllama
 from langchain_classic.memory import ConversationBufferMemory
 
@@ -18,11 +19,40 @@ session_state = {
         "bairro": None,
         "preco_max": None,
         "quartos": None,
+        "aceita_pets": None,
+        "garagem": None,
+        "banheiros": None,
+        "area_min": None,
+        "custo_total_max": None,
         "imovel_atual_id": None
     }
 }
 
 # === CAMADA DE DADOS ===
+
+def obter_bairros_validos():
+    """Retorna lista de bairros únicos do banco."""
+    try:
+        conn = sqlite3.connect(DB_PATH)
+        cursor = conn.cursor()
+        cursor.execute("SELECT DISTINCT bairro FROM core_imovel")
+        bairros = [row[0] for row in cursor.fetchall() if row[0]]
+        conn.close()
+        return bairros
+    except:
+        return []
+
+def corrigir_bairro(bairro_usuario):
+    """Tenta corrigir o nome do bairro usando fuzzy matching."""
+    if not bairro_usuario: return None
+    
+    bairros_db = obter_bairros_validos()
+    matches = difflib.get_close_matches(bairro_usuario, bairros_db, n=1, cutoff=0.6)
+    
+    if matches:
+        return matches[0]
+    return bairro_usuario
+
 
 def executar_busca_db(filtros):
     """Executa a busca baseada puramente no JSON gerado pelo LLM."""
@@ -44,6 +74,14 @@ def executar_busca_db(filtros):
 
         # 2. Filtros Dinâmicos
         if filtros.get("bairro"):
+            # Fuzzy match e correção automática
+            bairro_original = filtros["bairro"]
+            bairro_corrigido = corrigir_bairro(bairro_original)
+            
+            if bairro_corrigido != bairro_original:
+                print(f"DEBUG SQL: Corrigido bairro '{bairro_original}' para '{bairro_corrigido}'")
+                filtros["bairro"] = bairro_corrigido # Atualiza o filtro com o nome correto
+            
             query += " AND LOWER(bairro) LIKE ?"
             params.append(f"%{filtros['bairro'].lower()}%")
             
@@ -54,6 +92,30 @@ def executar_busca_db(filtros):
         if filtros.get("quartos"):
             query += " AND quartos >= ?"
             params.append(filtros["quartos"])
+
+        if filtros.get("aceita_pets") is not None:
+            # Assumes database stores boolean as 1/0
+            if filtros["aceita_pets"]:
+                query += " AND aceita_pets = 1"
+            # If False, we generally don't filter out pets=1, unless specifically requested "sem pets"
+            # But usually "aceita pets" implies looking for True.
+
+        if filtros.get("garagem"):
+            query += " AND garagem >= ?"
+            params.append(filtros["garagem"])
+
+        if filtros.get("banheiros"):
+            query += " AND banheiros >= ?"
+            params.append(filtros["banheiros"])
+
+        if filtros.get("area_min"):
+            query += " AND area >= ?"
+            params.append(filtros["area_min"])
+
+        if filtros.get("custo_total_max"):
+            # Soma aluguel + iptu + condominio (usando IFNULL para tratar nulos como 0)
+            query += " AND (preco_aluguel + IFNULL(preco_iptu, 0) + IFNULL(preco_condominio, 0)) <= ?"
+            params.append(filtros["custo_total_max"])
 
         # Excluir o imóvel que já está sendo visto para não repetir recomendação
         if filtros.get("excluir_id"):
@@ -82,8 +144,13 @@ def extrair_intencao_json(historico, mensagem_usuario, estado_atual):
         "imovel_especifico_id": int ou null,
         "filtros": {
             "bairro": "string ou null (null se o usuario pediu 'outros bairros')",
-            "preco_max": float ou null,
-            "quartos": int ou null
+            "preco_max": float ou null (apenas aluguel),
+            "custo_total_max": float ou null (aluguel + taxas),
+            "quartos": int ou null,
+            "aceita_pets": boolean ou null,
+            "garagem": int ou null,
+            "banheiros": int ou null,
+            "area_min": float ou null
         },
         "explicacao": "breve motivo da mudança de filtros"
     }
@@ -105,7 +172,12 @@ def extrair_intencao_json(historico, mensagem_usuario, estado_atual):
     2. Se o usuário disser "tá caro" ou "queria algo até 1500", ATUALIZE o 'preco_max'.
     3. Se o usuário disser "tem em outros bairros?" ou "outra localização", DEFINA "bairro": null (para limpar o filtro).
     4. Se o usuário disser "neste bairro", MANTENHA o bairro atual.
-    5. Se o usuário perguntar sobre o imóvel atual (ex: "tem garagem?"), MANTENHA os filtros e a intenção "CONVERSA".
+    5. Se o usuário perguntar se aceita PETS ou ANIMAIS, ou "tem que aceitar gato", defina "aceita_pets": true.
+    6. Se o usuário perguntar se tem GARAGEM ou VAGA, defina "garagem": 1 (ou a quantidade pedida).
+    7. Se o usuário pedir "2 banheiros", defina "banheiros": 2.
+    8. Se o usuário pedir "pelo menos 60m²" ou "area maior que 60", defina "area_min": 60.
+    9. Se o usuário disser "pacote até 2000" ou "total até 2000" (incluindo taxas), defina "custo_total_max": 2000.
+    10. Se o usuário perguntar sobre o imóvel atual (ex: "é mobiliado?"), MANTENHA os filtros e a intenção "CONVERSA".
 
     SAÍDA APENAS JSON VÁLIDO. NADA DE TEXTO ANTES OU DEPOIS.
     SCHEMA: {schema_json}
@@ -185,7 +257,17 @@ def chat_pipeline(mensagem_usuario):
     if imoveis_encontrados:
         texto_contexto = "IMÓVEIS ENCONTRADOS:\n"
         for i in imoveis_encontrados:
-            texto_contexto += f"- {i['titulo']} | Bairro: {i['bairro']} | R$ {i['preco_aluguel']} | Desc: {i['descricao'][:100]}...\n"
+            iptu = i['preco_iptu'] if i['preco_iptu'] else 0
+            condo = i['preco_condominio'] if i['preco_condominio'] else 0
+            total = i['preco_aluguel'] + iptu + condo
+            
+            detalhes = f"- {i['titulo']} | Bairro: {i['bairro']}\n"
+            detalhes += f"  Aluguel: R$ {i['preco_aluguel']} | IPTU: R$ {iptu} | Condomínio: R$ {condo}\n"
+            detalhes += f"  Total (~): R$ {total}\n"
+            detalhes += f"  {i['quartos']} quartos | {i['banheiros']} banheiros | {i['garagem']} vagas | {i['area']}m²\n"
+            detalhes += f"  Pets: {'Sim' if i['aceita_pets'] else 'Não'}\n"
+            detalhes += f"  Desc: {i['descricao']}\n" # Descrição completa para o LLM ter contexto total
+            texto_contexto += detalhes + "\n"
     else:
         texto_contexto = "STATUS DO SISTEMA: Nenhum imóvel encontrado com os filtros atuais."
 
