@@ -87,6 +87,14 @@ def extrair_intencao_json(historico, mensagem_usuario, estado_atual):
         "solicitou_visita": False
     }
 
+    # EXTRAÇÃO DE ID VIA REGEX (Prioritária)
+    # Procura por /imovel/123 ou id=123
+    match_id = re.search(r'(?:/imovel/|id=)(\d+)', mensagem_usuario)
+    if match_id:
+        default_res["imovel_especifico_id"] = int(match_id.group(1))
+        # Se achou ID, a intenção é BUSCA (ou interesse específico)
+        default_res["intencao"] = "BUSCA"
+
     prompt_analista = f"""
     Analise a mensagem e extraia filtros de busca.
     MENSAGEM: "{mensagem_usuario}"
@@ -99,6 +107,9 @@ def extrair_intencao_json(historico, mensagem_usuario, estado_atual):
     - Se a mensagem for cumprimento (Oi, Olá) SEM contexto anterior, limpe os filtros.
     - SE O USUÁRIO ESTIVER RESPONDENDO (ex: "pode ser às 14h", "enviei", "vou fazer"), MANTENHA OS FILTROS DO ESTADO ANTERIOR.
     - Se mencionar envio de documentos, ficha ou agendamento, MANTENHA os filtros.
+    - Se o usuário disser "na mesma região", "no mesmo bairro", "por ali", MANTENHA o bairro anterior. NÃO envie null.
+    - Se "algo mais barato/em conta", TENTE extrair um novo preço máximo se possível, senão MANTENHA o anterior.
+    - PRESERVAÇÃO: Só envie "bairro": null se o usuário disser explicitamente "outra cidade", "qualquer lugar" ou um NOVO bairro incompatível.
 
     SAÍDA APENAS JSON:
     {{
@@ -114,6 +125,15 @@ def extrair_intencao_json(historico, mensagem_usuario, estado_atual):
             extracted = json.loads(match.group(0))
             final = default_res.copy()
             final.update(extracted)
+            
+            # FALLBACK: Se o LLM removeu o bairro mas o usuário pediu "mesma região"
+            termos_continuidade = ["mesma região", "mesmo bairro", "nessa região", "nesse bairro", "por ali"]
+            if any(t in mensagem_usuario.lower() for t in termos_continuidade):
+                bairro_atual = final["filtros"].get("bairro")
+                # Se for nulo ou termo genérico, restaura o anterior
+                if (not bairro_atual or bairro_atual.lower() in ["qualquer lugar", "qualquer bairro", "indiferente"]) and estado_atual.get("bairro"):
+                    final["filtros"]["bairro"] = estado_atual["bairro"]
+            
             return final
         return default_res
     except: return default_res
@@ -133,6 +153,7 @@ def gerar_resposta_ana_paula(contexto, mensagem_usuario):
     5. Se o cliente pediu um tipo específico (ex: casa) e você só tem outros tipos, explique: "Não encontrei casas, mas tenho estas opções no mesmo bairro:".
     6. Use no máximo 1 emoji por resposta. Foco em Locação.
     7. Para cada imóvel, apresente o PREÇO TOTAL (Aluguel + Taxas) se o cliente perguntar sobre valores. Use os dados detalhados do contexto.
+    8. NÃO INVENTE DADOS. Se o contexto não tiver IPTU ou Condomínio, diga "Valores de taxas a confirmar". NÃO assuma que é zero ou incluso se não estiver escrito.
     9. SE O CLIENTE QUISER VISITAR:
        a) VERIFIQUE se o cliente já informou dia/horário na mensagem atual.
           - SE JÁ INFORMOU: 
@@ -166,8 +187,20 @@ def chat_pipeline(mensagem_usuario):
     filtros_novos = analise.get("filtros", {})
     session_state["filtros"].update(filtros_novos)
     
+    # Se extraiu um ID específico, adiciona aos filtros para a busca
+    if analise.get("imovel_especifico_id"):
+        session_state["filtros"]["imovel_especifico_id"] = analise["imovel_especifico_id"]
+    else:
+        # Se NÃO veio ID na análise atual, remove do estado para não travar a busca
+        session_state["filtros"].pop("imovel_especifico_id", None)
+    
     # 1. Busca Principal (Exata)
     imoveis = executar_busca_db(session_state["filtros"])
+
+    # ANCORAGEM DE CONTEXTO: Se achou imóvel específico mas não tem bairro no filtro,
+    # define o bairro do imóvel como contexto atual.
+    if imoveis and not session_state["filtros"].get("bairro"):
+        session_state["filtros"]["bairro"] = imoveis[0]['bairro']
     
     tipo_pedido = session_state["filtros"].get("tipo")
     bairro_pedido = session_state["filtros"].get("bairro")
@@ -182,7 +215,8 @@ def chat_pipeline(mensagem_usuario):
             if alternativos_tipo:
                 contexto_extra += "\nALTERNATIVAS (Mesmo tipo em outros bairros):\n"
                 for i in alternativos_tipo:
-                    contexto_extra += f"- ID {i['id']}: {i['titulo']} no bairro {i['bairro']} (R$ {i['preco_aluguel']}). {i['descricao']}\n"
+                    pets_txt = "Aceita Pets" if i['aceita_pets'] else "Não aceita pets"
+                    contexto_extra += f"- ID {i['id']}: {i['titulo']} no bairro {i['bairro']} (Aluguel: R$ {i['preco_aluguel']}, IPTU: R$ {i['preco_iptu']}, Cond: R$ {i['preco_condominio']}). {pets_txt}. {i['descricao']}\n"
         
         # Busca Alternativa B: Qualquer tipo no MESMO bairro
         if bairro_pedido:
@@ -190,7 +224,8 @@ def chat_pipeline(mensagem_usuario):
             if alternativos_bairro:
                 contexto_extra += "\nALTERNATIVAS (Outros imóveis neste mesmo bairro):\n"
                 for i in alternativos_bairro:
-                    contexto_extra += f"- ID {i['id']}: {i['titulo']} no {i['bairro']} (R$ {i['preco_aluguel']}). {i['descricao']}\n"
+                    pets_txt = "Aceita Pets" if i['aceita_pets'] else "Não aceita pets"
+                    contexto_extra += f"- ID {i['id']}: {i['titulo']} no {i['bairro']} (Aluguel: R$ {i['preco_aluguel']}, IPTU: R$ {i['preco_iptu']}, Cond: R$ {i['preco_condominio']}). {pets_txt}. {i['descricao']}\n"
 
     # Formatação do Contexto para o LLM
     texto_contexto = "IMÓVEIS ENCONTRADOS (BUSCA EXATA):\n"
