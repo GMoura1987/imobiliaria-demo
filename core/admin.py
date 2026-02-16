@@ -9,5 +9,5 @@ class ImovelImageInline(admin.TabularInline):
 @admin.register(Imovel)
 class ImovelAdmin(admin.ModelAdmin):
     inlines = [ImovelImageInline]
-    list_display = ('titulo', 'cidade', 'preco_aluguel')
-    search_fields = ('titulo', 'cidade', 'bairro')
+    list_display = ('titulo', 'cidade', 'bairro', 'codigo_bairro', 'especificacao', 'preco_aluguel')
+    search_fields = ('titulo', 'cidade', 'bairro', 'codigo_bairro')

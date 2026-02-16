@@ -16,6 +16,17 @@ class Imovel(models.Model):
     preco_condominio = models.DecimalField(max_digits=10, decimal_places=2)
     aceita_pets = models.BooleanField(default=False)
     imagem = models.CharField(max_length=255, null=True, blank=True)
+    
+    # Novos campos solicitados
+    codigo_bairro = models.CharField(max_length=100, blank=True, null=True, help_text="Ex: São Mateus 200")
+    
+    TIPO_IMOVEL_CHOICES = [
+        ('casa', 'Casa'),
+        ('apartamento', 'Apartamento'),
+        ('kitnet', 'Kitnet'),
+        ('comercio', 'Comércio'),
+    ]
+    especificacao = models.CharField(max_length=50, choices=TIPO_IMOVEL_CHOICES, blank=True, null=True)
 
     def __str__(self):
         return self.titulo
