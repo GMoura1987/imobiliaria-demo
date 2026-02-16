@@ -17,8 +17,12 @@ DOCS_LOCACAO = """
 - Se PJ: Comprovante de Pessoa Jurídica (Contrato Social/Cartão CNPJ)
 """
 
-llm_analyst = ChatOllama(model="gemma2:9b", temperature=0.0) 
-llm_chat = ChatOllama(model="gemma2:9b", temperature=0.3)
+# --- MIX DE MODELOS PARA VRAM 8GB ---
+# Qwen 2.5 3B: Especialista em JSON/Lógica, muito rápido e leve (~2GB VRAM)
+llm_analyst = ChatOllama(model="qwen2.5:3b", temperature=0.0) 
+
+# Llama 3.1 8B: Bom em instruções e persona, cabe na VRAM (~5GB)
+llm_chat = ChatOllama(model="llama3.1:8b", temperature=0.3)
 
 # Memória (Silenciando o warning internamente ou ignorando para foco na lógica)
 memory = ConversationBufferMemory(memory_key="chat_history", return_messages=True)
@@ -57,10 +61,9 @@ def executar_busca_db(filtros):
             params.append(f"%{bairro_final.lower()}%")
             
         if filtros.get("tipo"):
-            # Busca no título ou descrição se não houver coluna 'tipo'
-            query += " AND (LOWER(titulo) LIKE ? OR LOWER(descricao) LIKE ?)"
-            params.append(f"%{filtros['tipo'].lower()}%")
-            params.append(f"%{filtros['tipo'].lower()}%")
+            # Busca pela coluna especificacao (casa, apartamento, kitnet)
+            query += " AND LOWER(especificacao) = ?"
+            params.append(filtros['tipo'].lower())
 
         if filtros.get("preco_max"):
             query += " AND preco_aluguel <= ?"
@@ -90,14 +93,15 @@ def extrair_intencao_json(historico, mensagem_usuario, estado_atual):
     ESTADO ANTERIOR: {json.dumps(estado_atual)}
 
     REGRAS:
-    - tipo: Identifique se o usuário quer 'casa', 'apartamento', 'kitnet' ou 'cobertura'.
-    - bairro: Identifique o local.
+    - tipo: SOMENTE preencha se o usuário EXPLICITAMENTE pediu 'casa', 'apartamento' ou 'kitnet'. Se o usuário disse apenas "imóveis", "opções" ou algo genérico, tipo DEVE ser null.
+    - bairro: Identifique o local mencionado.
     - Se o usuário mudar de ideia (ex: "quero em outro bairro"), limpe o bairro anterior.
+    - Se a mensagem for cumprimento, saudação ou conversa casual, intencao deve ser "CONVERSA" e filtros vazios.
 
     SAÍDA APENAS JSON:
     {{
         "intencao": "BUSCA" | "CONVERSA",
-        "filtros": {{ "bairro": str, "tipo": str, "preco_max": float }},
+        "filtros": {{ "bairro": str | null, "tipo": str | null, "preco_max": float | null }},
         "solicitou_visita": bool
     }}
     """
@@ -116,15 +120,18 @@ def extrair_intencao_json(historico, mensagem_usuario, estado_atual):
 
 def gerar_resposta_ana_paula(contexto, mensagem_usuario):
     prompt_sistema = f"""
-    Você é a Ana Paula, corretora em Juiz de Fora. 
+    Você é a Ana Paula, corretora de imóveis em Juiz de Fora, MG.
+    Seu tom é simpático, profissional e direto.
     
-    REGRAS DE OURO:
-    1. Se não houver o imóvel EXATO solicitado (ex: não tem casa em tal bairro), diga: "No momento não tenho [tipo] no [bairro]".
-    2. Logo em seguida, apresente as ALTERNATIVAS que o sistema encontrou (outros tipos no mesmo bairro ou o mesmo tipo em outros bairros).
-    3. Nunca ignore o pedido do usuário. Se ele pediu casa e você só tem apartamento, explique isso.
-    4. Max 1 emoji. Foco em Locação.
-
-    DOCUMENTOS: {DOCS_LOCACAO}
+    REGRAS OBRIGATÓRIAS:
+    1. Apresente TODOS os imóveis listados no CONTEXTO abaixo. Não omita nenhum.
+    2. Se o contexto diz "Nenhum imóvel encontrado", aí sim diga que não encontrou e pergunte se quer buscar em outro bairro ou tipo.
+    3. Se há imóveis no contexto, NUNCA diga que não tem. Apenas apresente-os de forma organizada.
+    4. Se o cliente fez uma pergunta genérica ("imóveis no bairro X"), mostre todos os tipos disponíveis.
+    5. Se o cliente pediu um tipo específico (ex: casa) e você só tem outros tipos, explique: "Não encontrei casas, mas tenho estas opções no mesmo bairro:".
+    6. Use no máximo 1 emoji por resposta. Foco em Locação.
+    7. Para cada imóvel, mencione: nome, bairro, preço e uma breve descrição.
+    8. Se perguntarem sobre documentação para locação, informe: {DOCS_LOCACAO}
     
     CONTEXTO DO BANCO DE DADOS:
     {contexto}
@@ -150,25 +157,23 @@ def chat_pipeline(mensagem_usuario):
     
     contexto_extra = ""
     
-    # 2. Lógica de Alternativas (Se a busca principal for frustrante)
-    if not imoveis or (tipo_pedido and len(imoveis) < 2):
+    # 2. Lógica de Alternativas (SOMENTE se busca principal retornou ZERO resultados)
+    if not imoveis:
         # Busca Alternativa A: Mesmo tipo em QUALQUER bairro
         if tipo_pedido:
             alternativos_tipo = executar_busca_db({"tipo": tipo_pedido})
             if alternativos_tipo:
                 contexto_extra += "\nALTERNATIVAS (Mesmo tipo em outros bairros):\n"
                 for i in alternativos_tipo:
-                    contexto_extra += f"- ID {i['id']}: {i['titulo']} no bairro {i['bairro']} (R$ {i['preco_aluguel']})\n"
+                    contexto_extra += f"- ID {i['id']}: {i['titulo']} no bairro {i['bairro']} (R$ {i['preco_aluguel']}). {i['descricao']}\n"
         
         # Busca Alternativa B: Qualquer tipo no MESMO bairro
         if bairro_pedido:
             alternativos_bairro = executar_busca_db({"bairro": bairro_pedido})
-            # Filtra para não repetir o que já pode ter vindo na busca principal
-            alternativos_bairro = [i for i in alternativos_bairro if i['id'] not in [x['id'] for x in imoveis]]
             if alternativos_bairro:
                 contexto_extra += "\nALTERNATIVAS (Outros imóveis neste mesmo bairro):\n"
                 for i in alternativos_bairro:
-                    contexto_extra += f"- ID {i['id']}: {i['titulo']} ({i['preco_aluguel']})\n"
+                    contexto_extra += f"- ID {i['id']}: {i['titulo']} no {i['bairro']} (R$ {i['preco_aluguel']}). {i['descricao']}\n"
 
     # Formatação do Contexto para o LLM
     texto_contexto = "IMÓVEIS ENCONTRADOS (BUSCA EXATA):\n"
