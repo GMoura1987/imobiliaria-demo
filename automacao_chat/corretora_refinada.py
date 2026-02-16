@@ -93,10 +93,12 @@ def extrair_intencao_json(historico, mensagem_usuario, estado_atual):
     ESTADO ANTERIOR: {json.dumps(estado_atual)}
 
     REGRAS:
-    - tipo: SOMENTE preencha se o usuário EXPLICITAMENTE pediu 'casa', 'apartamento' ou 'kitnet'. Se o usuário disse apenas "imóveis", "opções" ou algo genérico, tipo DEVE ser null.
+    - tipo: SOMENTE preencha se o usuário EXPLICITAMENTE pediu 'casa', 'apartamento' ou 'kitnet'.
     - bairro: Identifique o local mencionado.
     - Se o usuário mudar de ideia (ex: "quero em outro bairro"), limpe o bairro anterior.
-    - Se a mensagem for cumprimento, saudação ou conversa casual, intencao deve ser "CONVERSA" e filtros vazios.
+    - Se a mensagem for cumprimento (Oi, Olá) SEM contexto anterior, limpe os filtros.
+    - SE O USUÁRIO ESTIVER RESPONDENDO (ex: "pode ser às 14h", "enviei", "vou fazer"), MANTENHA OS FILTROS DO ESTADO ANTERIOR.
+    - Se mencionar envio de documentos, ficha ou agendamento, MANTENHA os filtros.
 
     SAÍDA APENAS JSON:
     {{
@@ -132,13 +134,16 @@ def gerar_resposta_ana_paula(contexto, mensagem_usuario):
     6. Use no máximo 1 emoji por resposta. Foco em Locação.
     7. Para cada imóvel, apresente o PREÇO TOTAL (Aluguel + Taxas) se o cliente perguntar sobre valores. Use os dados detalhados do contexto.
     9. SE O CLIENTE QUISER VISITAR:
-       a) Diga "Que ótimo!" e PERGUNTE IMEDIATAMENTE qual a disponibilidade de dia e horário.
-       b) NÃO FALE DA FICHA DE CADASTRO AINDA. Aguarde o cliente responder o horário.
-       c) APÓS o cliente definir o horário: Confirme o agendamento e SÓ ENTÃO explique que a **Ficha de Pré-Cadastro** agiliza a análise jurídica.
+       a) Diga "Que ótimo!" e VERIFIQUE se o cliente já informou dia/horário.
+          - SE JÁ INFORMOU: Confirme o agendamento para esse horário e vá para o passo (c).
+          - SE NÃO INFORMOU: Pergunte qual a disponibilidade de dia e horário.
+       b) NÃO FALE DA FICHA DE CADASTRO se ainda não tiver o horário definido.
+       c) APÓS o horário estar definido/confirmado: Explique que a **Ficha de Pré-Cadastro** agiliza a análise jurídica.
        d) Liste os documentos necessários ({DOCS_LOCACAO}) logo após explicar a ficha.
        e) Se o cliente NÃO quiser fazer a ficha, diga "Tudo bem, nos encontramos no imóvel". RESSALTE que para realizar a visita, o ÚNICO documento obrigatório em mãos é o **RG**.
     10. NÃO mencione a ficha de cadastro em todas as mensagens. Apenas APÓS agendar a visita.
     11. SE O CLIENTE ACHAR CARO: Tente argumentar sobre o custo-benefício (localização, acabamento) OU ofereça opções mais baratas se houver no contexto.
+    12. SE O CLIENTE DISSER QUE ENVIOU DOCUMENTOS OU FICHA: Agradeça, diga que os documentos foram recebidos para análise jurídica e REAFIRME o dia/horário da visita agendada.
     
     CONTEXTO DO BANCO DE DADOS:
     {contexto}
