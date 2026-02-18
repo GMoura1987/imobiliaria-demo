@@ -222,3 +222,4 @@ models
 .instagram_browser_data
 .instagram_session
 *.pt
+*.sqlite3
